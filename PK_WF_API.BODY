@@ -1,0 +1,1995 @@
+create or replace PACKAGE BODY PK_WF_API IS
+ 
+FUNCTION START_PROCESS_ALLOWED
+ (P_USE_ID IN NUMBER
+ ,P_PRO_ID IN NUMBER
+ ,P_PROC_ID IN NUMBER
+ )
+ RETURN VARCHAR2;
+FUNCTION GET_TIN_FILE_LIST
+ (P_TIN_ID IN VARCHAR2
+ )
+ RETURN VARCHAR2;
+ 
+ 
+FUNCTION START_PROCESS
+ (P_CTX_ID IN NUMBER
+ ,P_USE_ID IN NUMBER
+ ,P_PRO_ID IN NUMBER
+ ,P_PROC_ID IN NUMBER
+ ,P_NEXT_USE_ID IN NUMBER := null
+ )
+ RETURN VARCHAR2
+ IS
+-- Start a new process for this (user/project/company)
+-- ctx_id is instance id      
+ 
+-- to do: proc vars
+--        min_nr_times, meteen bij starten dus meerdere, maar dan zijn de next_gebruikers waarschijnlijk niet dezelfde als de opstartende gebruiker
+ 
+l_pin_id NUMBER;   
+l_error  VARCHAR2(4000);
+l_com_id NUMBER;
+ 
+-- First task(s)
+CURSOR c_pta IS
+  SELECT pta.id
+  FROM states        sta           
+  ,    process_tasks pta
+  WHERE sta.pro_id = p_proc_id
+  AND   sta.state_type = 'S'     --S=Start
+  AND   pta.from_sta_id = sta.id;
+ 
+-- Determine com_id
+CURSOR c_com IS
+  SELECT com_id
+  FROM users
+  WHERE id = p_use_id;
+ 
+l_return_value VARCHAR2(1000);
+BEGIN
+  
+  -- com_id (redundant)
+  OPEN c_com;
+  FETCH c_com INTO l_com_id;
+  CLOSE c_com;
+  
+  -- check if allowed  
+  IF pk_wf_api.start_process_allowed( p_use_id => p_use_id
+                                    , p_pro_id => p_pro_id
+                                    , p_proc_id => p_proc_id ) = 'Y' THEN
+   
+   -- Create a process_instance
+   l_pin_id := seq_all.NEXTVAL;
+   INSERT INTO process_instances
+   ( id
+   , use_id
+   , com_id
+   , pro_id                                       
+   , proc_id 
+   , ctx_id ) VALUES
+     ( l_pin_id
+     , p_use_id      -- current user
+     , l_com_id      
+     , p_pro_id
+     , p_proc_id
+     , p_ctx_id  );
+ 
+   -- Fill variables (name,value paires)
+   null;
+  
+   -- Create first task instance(s!)
+   FOR r_pta IN c_pta LOOP   
+     l_return_value := l_return_value ||  
+       pk_wf_api.create_task ( p_pin_id => l_pin_id
+                             , p_pta_id => r_pta.id 
+                             , p_use_id => p_use_id
+                             , p_next_use_id => p_use_id );  -- first task: p_use_id is the one who is executing
+   END LOOP;                      
+         
+  ELSE    
+    -- Error, not allowed
+    pk_api.sys_log( p_module   => 'pk_wf_api.start_process'
+                  , p_location => 1
+                  , p_type     => 'E' -- Error
+                  , p_message  => 'Starting this process is not allowed, p_use_id:'||p_use_id||
+                                      ' p_pro_id:'||p_pro_id||' p_proc_id:'||p_proc_id||' p_ctx_id:'||p_ctx_id 
+                  );    
+    ROLLBACK;
+    RETURN pk_xml_api.create_element('error','Starting this process is not allowed.');
+ 
+  END IF;
+  
+  RETURN l_return_value; -- null is ok
+         
+EXCEPTION WHEN OTHERS THEN    
+    l_error := SQLERRM; 
+    pk_api.sys_log( p_module   => 'pk_wf_api.start_process'
+                  , p_location => 10
+                  , p_type     => 'E' -- Error
+                  , p_message  => 'Unexpected error, error:'||substr(l_error,1,3000) || ' p_use_id:'||p_use_id||
+                                  ' p_pro_id:'||p_pro_id||' p_proc_id:'||p_proc_id||' p_ctx_id:'||p_ctx_id  
+                  );        
+    ROLLBACK;
+    RETURN pk_xml_api.create_element('error','Unexpected error when starting the process.');
+END;
+FUNCTION CREATE_TASK
+ (P_PIN_ID IN NUMBER
+ ,P_PTA_ID IN NUMBER
+ ,P_USE_ID IN NUMBER
+ ,P_NEXT_USE_ID IN NUMBER := null
+ )
+ RETURN VARCHAR2
+ IS
+-- Create a task  
+-- Called from 
+-- - create_next_task
+-- - start_process
+ 
+-- later
+-- if the created task is of type Machine then Execute the program
+--  first solve user problem for system task
+ 
+CURSOR c_pta IS
+  SELECT task_type
+  FROM process_tasks
+  WHERE id = p_pta_id;
+ 
+l_task_type   VARCHAR2(1);
+l_tin_id      NUMBER;
+l_pin_id      NUMBER;
+ 
+l_error VARCHAR2(3000);
+BEGIN
+  
+  -- Determine task type
+  OPEN c_pta;
+  FETCH c_pta INTO l_task_type;
+  CLOSE c_pta;  
+    
+  -- create task
+  l_tin_id := seq_all.NEXTVAL;
+  INSERT INTO task_instances
+   ( id
+   , pin_id
+   , pta_id 
+   , use_id_created 
+   , use_id_execute ) VALUES
+     ( l_tin_id
+     , p_pin_id   
+     , p_pta_id 
+     , p_use_id
+     , p_next_use_id );               
+  
+  -- Machine task
+--  IF l_task_type = 'M' THEN
+--    pk_workflow.execute_machine_task( p_tin_id => l_tin_id );
+--  END IF;  
+  RETURN NULL;  -- null is ok
+ 
+EXCEPTION WHEN OTHERS THEN
+    l_error := SQLERRM; 
+    pk_api.sys_log( p_module   => 'pk_wf_api.create_task'
+                  , p_location => 10
+                  , p_type     => 'E' -- Error
+                  , p_message  => 'Unexpected error, error:'||substr(l_error,1,3000) || ' p_use_id:'||p_use_id||
+                                  ' p_pin_id:'||p_pin_id||' p_pta_id:'||p_pta_id||' p_next_use_id:'||p_next_use_id  
+                  );        
+    ROLLBACK;
+    RETURN pk_xml_api.create_element('error','Unexpected error when creating the task.');
+END;
+FUNCTION START_PROCESS_ALLOWED
+ (P_USE_ID IN NUMBER
+ ,P_PRO_ID IN NUMBER
+ ,P_PROC_ID IN NUMBER
+ )
+ RETURN VARCHAR2
+ IS
+-- Is this user allowed to start a process for this project       
+                         
+CURSOR c_vupp IS
+  SELECT 1
+  FROM vw_use_pro_proc_active vupp
+  WHERE vupp.use_id = p_use_id
+  AND   vupp.pro_id = p_pro_id
+  AND   vupp.proc_id = p_proc_id
+  AND   vupp.prr_ind_start = 'Y'
+  AND   vupp.ind_active = 'Y';
+ 
+l_dummy NUMBER;
+BEGIN
+   
+   OPEN c_vupp;
+   FETCH c_vupp INTO l_dummy;
+   CLOSE c_vupp;
+   
+   IF l_dummy = 1 THEN 
+     RETURN 'Y';
+   ELSE 
+     RETURN 'N';
+   END IF;
+    
+END;
+FUNCTION GET_USE_ALL_PROCESS
+ (P_USE_ID IN NUMBER
+ ,P_PRO_ID IN NUMBER
+ )
+ RETURN VARCHAR2
+ IS
+-- determine the processes that a user may start for a project
+ 
+l_response VARCHAR2(10000);
+ 
+-- procedures 
+CURSOR c_proc IS 
+  SELECT vupp.proc_id              id
+  ,      vupp.proc_name            name
+  ,      vupp.proc_screen_page     proc_screen_page
+  ,      max(vupp.prr_ind_start)   prr_ind_start
+  FROM vw_use_pro_proc_active vupp
+  WHERE vupp.use_id = p_use_id
+  AND   vupp.pro_id = p_pro_id
+  AND   vupp.ind_active = 'Y'
+  GROUP BY vupp.proc_id
+  ,        vupp.proc_name
+  ,        vupp.proc_screen_page;
+BEGIN
+    
+ -- procedures
+ FOR r_proc IN c_proc LOOP
+    l_response := l_response || pk_xml_api.create_element('process',
+                                  pk_xml_api.create_element('proc_id',r_proc.id)  ||
+                                  pk_xml_api.create_save_element('proc_name',r_proc.name) ||
+                                  pk_xml_api.create_save_element('initiate_page',r_proc.proc_screen_page) ||
+                                  pk_xml_api.create_save_element('ind_start',r_proc.prr_ind_start)                                   
+                                                  );
+ END LOOP;   
+ 
+ RETURN pk_xml_api.create_element('processes',l_response); 
+ 
+END;
+FUNCTION GET_NR_OF_USE_TASKS
+ (P_USE_ID IN NUMBER
+ ,P_PRO_ID IN NUMBER
+ ,P_PAC_ID IN VARCHAR2 := null
+ ,P_COM_ID IN VARCHAR2 := null
+ )
+ RETURN NUMBER
+ IS
+-- get the number of tasks of a project for a user  
+l_nr NUMBER;
+BEGIN
+ 
+  SELECT COUNT(1)   -- Number of open tasks for a user and a project 
+  INTO l_nr
+  FROM vw_use_current_tasks vuct
+  WHERE vuct.use_id = p_use_id
+  AND   vuct.pro_id = p_pro_id
+  AND  (p_pac_id IS NULL 
+        OR vuct.ctx_id IN
+          (SELECT ctx.id 
+           FROM
+              (SELECT ect_id id
+               ,      wnu_id 
+               FROM ect_wbs_numbers
+               UNION
+               SELECT irq_id id
+               ,      wnu_id 
+               FROM ir_wbs_numbers
+               UNION
+               SELECT eis_id id
+               ,      wnu_id 
+               FROM ei_wbs_numbers
+               ) ctx
+           WHERE ctx.wnu_id IN
+            (SELECT wbs.wnu_id
+             FROM package_wbs_numbers wbs
+             WHERE wbs.pac_id = p_pac_id
+             )
+           )
+          )
+ AND  (p_com_id IS NULL 
+       OR vuct.ctx_id IN
+        (SELECT ctx.id 
+         FROM
+           (SELECT to_number(id) id
+           ,       target_com_id com_id 
+           FROM ects
+           UNION
+           SELECT id
+           ,      rec_com_id 
+           FROM eis
+           UNION
+           SELECT id
+           ,      com_id 
+           FROM information_requests
+           ) ctx
+         WHERE ctx.com_id = p_com_id)
+       );  
+    
+  RETURN l_nr;
+  
+END;
+FUNCTION GET_NR_OF_ALL_TASKS
+ (P_PRO_ID IN NUMBER
+ ,P_PAC_ID IN NUMBER := null
+ ,P_COM_ID IN NUMBER := null
+ )
+ RETURN NUMBER
+ IS
+-- get the number of all open tasks for a project   
+ 
+l_nr NUMBER;
+BEGIN
+ 
+  SELECT COUNT(1)   -- Number of open tasks for a project 
+  INTO l_nr
+  FROM vw_use_current_tasks vuct
+  WHERE vuct.pro_id = p_pro_id
+  AND  (p_pac_id IS NULL 
+        OR vuct.ctx_id IN
+          ( SELECT ctx.id 
+            FROM
+                (SELECT ect_id id
+               ,      wnu_id 
+               FROM ect_wbs_numbers
+               UNION
+               SELECT irq_id id
+               ,      wnu_id 
+               FROM ir_wbs_numbers
+               UNION
+               SELECT eis_id id
+               ,      wnu_id 
+               FROM ei_wbs_numbers
+                 ) ctx
+            WHERE ctx.wnu_id IN
+               ( SELECT wbs.wnu_id
+                 FROM package_wbs_numbers wbs
+                 WHERE wbs.pac_id = p_pac_id
+               )
+           )
+        )
+  AND (p_com_id IS NULL 
+       OR vuct.ctx_id IN
+         ( SELECT ctx.id 
+           FROM
+              ( SELECT to_number(id) id
+                , target_com_id com_id 
+                FROM ects
+                UNION
+                SELECT id
+                ,      rec_com_id 
+                FROM eis
+                UNION
+                SELECT id
+                ,      com_id 
+                FROM information_requests
+                ) ctx
+            WHERE ctx.com_id = p_com_id
+          )
+       );  
+    
+  RETURN l_nr;
+  
+END;
+FUNCTION GET_NR_OF_USE_ALERTS
+ (P_USE_ID IN NUMBER
+ ,P_PRO_ID IN NUMBER
+ ,P_PAC_ID IN NUMBER := null
+ ,P_COM_ID IN NUMBER := null
+ )
+ RETURN NUMBER
+ IS
+-- get the number of alerts of tasks for a project for a user         
+-- Alerts which are not yet dismissed (may have been seen though)
+l_nr NUMBER;
+BEGIN
+ 
+  SELECT COUNT(1)  -- Number of open tasks for a user and a project
+  INTO l_nr  
+  FROM TASK_INSTANCES A
+  , PROCESS_INSTANCES P
+  WHERE P.ID = A.PIN_ID
+  AND P.PRO_ID = p_pro_id
+  AND NOT A.DATE_FINISHED IS NULL
+  AND EXISTS
+   (SELECT '*' FROM PIN_PTA_ALERT_USERS B
+    WHERE B.PIN_ID = A.PIN_ID
+    AND B.USE_ID = p_use_id
+    AND B.PTA_ID = A.PTA_ID
+    AND B.IND_ACTIVE = 'Y')
+    AND  (p_pac_id IS NULL 
+        OR p.ctx_id IN
+          (SELECT ctx.id 
+           FROM
+              (SELECT ect_id id
+               ,      wnu_id 
+               FROM ect_wbs_numbers
+               UNION
+               SELECT irq_id id
+               ,      wnu_id 
+               FROM ir_wbs_numbers
+               UNION
+               SELECT eis_id id
+               ,      wnu_id 
+               FROM ei_wbs_numbers
+               ) ctx
+           WHERE ctx.wnu_id IN
+            (SELECT wbs.wnu_id
+             FROM package_wbs_numbers wbs
+             WHERE wbs.pac_id = p_pac_id
+             )
+           )
+          )
+  AND (p_com_id IS NULL 
+       OR p.ctx_id IN
+         ( SELECT ctx.id 
+           FROM
+              ( SELECT to_number(id) id
+                , target_com_id com_id 
+                FROM ects
+                UNION
+                SELECT id
+                ,      rec_com_id 
+                FROM eis
+                UNION
+                SELECT id
+                ,      com_id 
+                FROM information_requests
+                ) ctx
+            WHERE ctx.com_id = p_com_id
+          )
+       );
+ 
+  RETURN l_nr;
+ 
+END;
+FUNCTION GET_NR_OF_USE_SHARED
+ (P_USE_ID IN NUMBER
+ ,P_PRO_ID IN NUMBER
+ ,P_PAC_ID IN NUMBER := null
+ ,P_COM_ID IN NUMBER := null
+ )
+ RETURN NUMBER
+ IS
+-- get the number of shared tasks of a project for a user
+l_nr NUMBER;
+BEGIN
+ 
+  SELECT COUNT(1)   -- Number of shared tasks (actions) for a user and a project
+  INTO l_nr
+  FROM TASK_INSTANCES A
+  ,    PROCESS_INSTANCES P
+  WHERE P.ID = A.PIN_ID
+  AND P.PRO_ID = p_pro_id
+  AND NOT A.DATE_FINISHED IS NULL
+  AND (EXISTS
+   (SELECT '*' FROM TIN_SHARE_USERS B
+    WHERE B.TIN_ID = A.ID
+    AND B.USE_ID = p_use_id
+    AND B.IND_ACTIVE = 'Y')
+  OR EXISTS
+   (SELECT '*' FROM PIN_SHARE_USERS B
+    WHERE B.PIN_ID = A.PIN_ID
+    AND B.USE_ID = p_use_id
+    AND B.IND_ACTIVE = 'Y'))
+  AND NOT EXISTS
+    (SELECT '*' FROM dismissed_tasks dit
+     WHERE dit.use_id = p_use_id
+     AND   dit.tin_id = A.id) 
+     AND  (p_pac_id IS NULL 
+        OR p.ctx_id IN
+          (SELECT ctx.id 
+           FROM
+              (SELECT ect_id id
+               ,      wnu_id 
+               FROM ect_wbs_numbers
+               UNION
+               SELECT irq_id id
+               ,      wnu_id 
+               FROM ir_wbs_numbers
+               UNION
+               SELECT eis_id id
+               ,      wnu_id 
+               FROM ei_wbs_numbers
+               ) ctx
+           WHERE ctx.wnu_id IN
+            (SELECT wbs.wnu_id
+             FROM package_wbs_numbers wbs
+             WHERE wbs.pac_id = p_pac_id
+             )
+           )
+          )
+  AND (p_com_id IS NULL 
+       OR p.ctx_id IN
+         ( SELECT ctx.id 
+           FROM
+              ( SELECT to_number(id) id
+                , target_com_id com_id 
+                FROM ects
+                UNION
+                SELECT id
+                ,      rec_com_id 
+                FROM eis
+                UNION
+                SELECT id
+                ,      com_id 
+                FROM information_requests
+                ) ctx
+            WHERE ctx.com_id = p_com_id
+          )
+       ); 
+    
+  RETURN l_nr;
+ 
+END;
+FUNCTION GET_NR_OF_USE_NEWS
+ (P_USE_ID IN NUMBER
+ ,P_PRO_ID IN NUMBER
+ ,P_PAC_ID IN NUMBER := null
+ ,P_COM_ID IN NUMBER := null
+ )
+ RETURN NUMBER
+ IS
+-- get the number of news tasks of a project for a user
+l_nr NUMBER;
+BEGIN
+ 
+SELECT COUNT(1)   -- Number of news items for a user and a project
+  INTO l_nr
+  FROM TASK_INSTANCES A
+  ,    PROCESS_INSTANCES P
+  WHERE P.ID = A.PIN_ID
+  AND P.PRO_ID = p_pro_id
+  AND NOT A.DATE_FINISHED IS NULL
+  AND NOT (EXISTS
+   (SELECT '*' 
+    FROM TIN_SHARE_USERS B
+    WHERE B.TIN_ID = A.ID
+    AND B.USE_ID = p_use_id
+    AND B.IND_ACTIVE = 'Y')
+  OR EXISTS
+   (SELECT '*'
+    FROM PIN_SHARE_USERS B
+    WHERE B.PIN_ID = A.PIN_ID
+    AND B.USE_ID = p_use_id
+    AND B.IND_ACTIVE = 'Y'))
+  AND NOT EXISTS
+   (SELECT '*'
+    FROM PIN_PTA_ALERT_USERS B
+    WHERE B.PIN_ID = A.PIN_ID
+    AND B.USE_ID = p_use_id
+    AND B.PTA_ID = A.PTA_ID
+    AND B.IND_ACTIVE = 'Y')
+  AND NOT EXISTS
+    (SELECT '*'
+     FROM dismissed_tasks dit
+     WHERE dit.use_id = p_use_id
+     AND   dit.tin_id = A.id)
+    AND  (p_pac_id IS NULL 
+        OR p.ctx_id IN
+          (SELECT ctx.id 
+           FROM
+              (SELECT ect_id id
+               ,      wnu_id 
+               FROM ect_wbs_numbers
+               UNION
+               SELECT irq_id id
+               ,      wnu_id 
+               FROM ir_wbs_numbers
+               UNION
+               SELECT eis_id id
+               ,      wnu_id 
+               FROM ei_wbs_numbers
+               ) ctx
+           WHERE ctx.wnu_id IN
+            (SELECT wbs.wnu_id
+             FROM package_wbs_numbers wbs
+             WHERE wbs.pac_id = p_pac_id
+             )
+           )
+          )
+  AND (p_com_id IS NULL 
+       OR p.ctx_id IN
+         ( SELECT ctx.id 
+           FROM
+              ( SELECT to_number(id) id
+                , target_com_id com_id 
+                FROM ects
+                UNION
+                SELECT id
+                ,      rec_com_id 
+                FROM eis
+                UNION
+                SELECT id
+                ,      com_id 
+                FROM information_requests
+                ) ctx
+            WHERE ctx.com_id = p_com_id
+          )
+       );
+ 
+  RETURN l_nr;
+ 
+END;
+FUNCTION GET_NR_OF_DOCS
+ (P_USE_ID IN NUMBER
+ ,P_PRO_ID IN NUMBER
+ ,P_PAC_ID IN VARCHAR2 := null
+ ,P_COM_ID IN VARCHAR2 := null
+ )
+ RETURN NUMBER
+ IS
+-- get number of documents of a project for a user  
+l_nr NUMBER;
+BEGIN
+ 
+SELECT COUNT(DISTINCT dgr.id)
+  INTO l_nr
+  FROM document_groups         dgr
+  ,    document_group_usages   dga
+  ,    (select 'ects'                 ctx_table
+        ,       ewn.ect_id            id
+        ,       ewn.wnu_id            wnu_id
+        from ect_wbs_numbers ewn
+           union
+        select 'information_requests' ctx_table
+        ,       iwn.irq_id            id
+        ,       iwn.wnu_id            wnu_id
+        from ir_wbs_numbers iwn
+           union
+        select 'eis'                  ctx_table
+        ,       ewn.eis_id            id
+        ,       ewn.wnu_id            wnu_id
+        from ei_wbs_numbers ewn) ctx
+  WHERE dgr.id = dga.dgr_id
+  AND dgr.pro_id = p_pro_id
+  AND ctx.ctx_table = dga.ctx_table
+  AND ctx.id = dga.ctx_id
+  AND (p_pac_id IS NULL OR ctx.wnu_id IN
+   (SELECT pwb.wnu_id
+    FROM packages pac
+    ,    package_wbs_numbers pwb
+    WHERE pac.id = p_pac_id
+    AND pwb.pac_id = pac.id));
+ 
+  RETURN l_nr;
+  
+END;
+FUNCTION GET_PROCESS_INFO_SI
+ (P_PIN_ID IN NUMBER
+ )
+ RETURN VARCHAR2
+ IS
+-- process info
+-- alleen voor SI
+ 
+CURSOR c_pin IS
+  SELECT sii.pro_id       pro_id 
+  ,      sii.com_id       com_id
+  ,      com.name         com_name 
+  ,      com.type         com_type
+  ,      sii.agr_id       agr_id     
+  ,      agr.po_nr        agr_po_nr
+  ,      agr.description  agr_description
+  ,      wnu.id           wnu_id
+  ,      wnu.nr           wnu_nr
+  ,      wnu.description  wnu_description
+  ,      sii.subject      subject
+  ,      sii.description  description
+  ,      sii.required_start_date                  required_start_date
+  ,      sii.indicated_end_date                   indicated_end_date
+  ,      pk_si.get_formatted_si_nr(p_id=>sii.id)  nr
+  ,      pin.use_id                               use_id
+  ,      use.name                                 use_name
+  ,      pin.date_started                         date_started
+  ,      pin.date_finished                        date_finished   
+  ,      proc.id                                  proc_id
+  ,      proc.name                                proc_name
+  FROM site_instructions sii
+  ,    process_instances pin  
+  ,    processes         proc    
+  ,    users             use
+  ,    companies         com  
+  ,    agreements        agr 
+  ,    wbs_numbers       wnu 
+  WHERE pin.ctx_id = sii.id  
+  AND   pin.use_id = use.id 
+  AND   sii.com_id = com.id 
+  AND   sii.agr_id = agr.id 
+  AND   sii.wnu_id = wnu.id (+)
+  AND   pin.id = p_pin_id
+  AND   pin.proc_id = proc.id;
+r_pin c_pin%ROWTYPE;
+BEGIN
+  
+  OPEN c_pin;
+  FETCH c_pin INTO r_pin;
+  CLOSE c_pin;
+ 
+  RETURN pk_xml_api.create_element('process', 
+            pk_xml_api.create_element('proc_id',r_pin.proc_id)  ||
+            pk_xml_api.create_save_element('proc_name',r_pin.proc_name)   ||
+            pk_xml_api.create_element('pro_id',r_pin.pro_id) ||
+            pk_xml_api.create_element('com_id',r_pin.com_id) ||
+            pk_xml_api.create_save_element('com_name',r_pin.com_name) ||   
+            pk_xml_api.create_element('com_type',r_pin.com_type) ||            
+            pk_xml_api.create_element('agr_id',r_pin.agr_id) ||
+            pk_xml_api.create_save_element('agr_po_nr',r_pin.agr_po_nr) ||
+            pk_xml_api.create_save_element('agr_description',r_pin.agr_description) ||
+            pk_xml_api.create_element('wnu_id',r_pin.wnu_id) ||
+            pk_xml_api.create_save_element('wnu_nr',r_pin.wnu_nr) ||
+            pk_xml_api.create_save_element('wnu_description',r_pin.wnu_description) ||     
+            pk_xml_api.create_save_element('description',r_pin.description) ||   
+            '<dot_id></dot_id>' ||    
+            '<doc_nr></doc_nr>' ||    
+            '<revision_number></revision_number>' ||    
+            '<revision_comment></revision_comment>' ||    
+            pk_xml_api.create_save_element('subject',r_pin.subject) ||
+            pk_xml_api.create_element('start_date',to_char(r_pin.required_start_date,'dd-mm-yyyy')) || 
+            pk_xml_api.create_element('end_date',to_char(r_pin.indicated_end_date,'dd-mm-yyyy')) ||     
+            '<reply_before></reply_before>' ||    
+            '<response></response>' ||            
+            pk_xml_api.create_element('nr',r_pin.nr) ||
+            pk_xml_api.create_element('use_id',r_pin.use_id) ||
+            pk_xml_api.create_save_element('use_name',r_pin.use_name) ||     
+           '<dest_use_id></dest_use_id>' ||
+           '<dest_use_name></dest_use_name>' || 
+            pk_xml_api.create_element('date_started',to_char(r_pin.date_started,'dd-mm-yyyy hh24:mi:ss')) || 
+            pk_xml_api.create_element('date_finished',to_char(r_pin.date_finished,'dd-mm-yyyy hh24:mi:ss')) 
+                                  );
+END;
+FUNCTION GET_PROCESS_INFO_IR
+ (P_PIN_ID IN NUMBER
+ )
+ RETURN VARCHAR2
+ IS
+-- process info
+-- alleen voor IR
+ 
+l_response    CLOB;
+l_wnu_list    VARCHAR2(10000);
+ 
+CURSOR c_pin IS
+  SELECT irq.pro_id       pro_id 
+  ,      irq.com_id       com_id
+  ,      com.name         com_name  
+  ,      com.type         com_type
+  ,      irq.agr_id       agr_id     
+  ,      agr.po_nr        agr_po_nr
+  ,      agr.description  agr_description
+--  ,      wnu.id           wnu_id
+--  ,      wnu.nr           wnu_nr
+--  ,      wnu.description  wnu_description
+  ,      irq.subject      subject
+  ,      irq.description  description 
+  ,      irq.reply_before reply_before 
+  ,      irq.response     response
+  ,      pk_ir.get_formatted_ir_nr(p_id=>irq.id)  nr
+  ,      pin.use_id                               use_id
+  ,      use.name                                 use_name    
+  ,      irq.use_id                               dest_use_id
+  ,      dest_use.name                            dest_use_name
+  ,      pin.date_started                         date_started
+  ,      pin.date_finished                        date_finished   
+  ,      proc.id                                  proc_id
+  ,      proc.name                                proc_name  
+  ,      irq.id                                   irq_id  
+  FROM information_requests irq
+  ,    process_instances pin      
+  ,    processes         proc    
+  ,    users             use
+  ,    companies         com  
+  ,    agreements        agr 
+--  ,    wbs_numbers       wnu  
+  ,    users             dest_use 
+  WHERE pin.ctx_id = irq.id  
+  AND   pin.use_id = use.id 
+  AND   irq.com_id = com.id 
+  AND   irq.agr_id = agr.id (+)
+--  AND   irq.wnu_id = wnu.id (+)
+  AND   irq.use_id = dest_use.id (+)
+  AND   pin.id = p_pin_id    
+  AND   pin.proc_id = proc.id;
+r_pin c_pin%ROWTYPE;
+ 
+-- ir wbs numbers
+CURSOR c_ir_wbs (b_irq_id NUMBER) IS
+  SELECT iwb.wnu_id       wnu_id
+  ,      wbs.nr           wnu_nr
+  ,      wbs.description  wnu_description
+  FROM ir_wbs_numbers       iwb
+  ,    wbs_numbers          wbs
+  WHERE iwb.irq_id = b_irq_id
+  AND wbs.id = iwb.wnu_id
+  ORDER BY iwb.wnu_id;
+BEGIN
+  
+  OPEN c_pin;
+  FETCH c_pin INTO r_pin;
+  CLOSE c_pin;
+ 
+  l_response := NULL;
+  l_wnu_list := NULL;
+ 
+  FOR r_ir_wbs IN c_ir_wbs (r_pin.irq_id) LOOP
+     l_wnu_list := l_wnu_list || pk_xml_api.create_element('wnu', pk_xml_api.create_element('wnu_id',r_ir_wbs.wnu_id) || 
+                   pk_xml_api.create_save_element('wnu_nr',r_ir_wbs.wnu_nr) ||
+                   pk_xml_api.create_save_element('wnu_description',r_ir_wbs.wnu_description)); 
+  END LOOP;   
+ 
+  -- Nog een conversie uitvoeren van information_requests naar ir_wbs_numbers
+  -- Daarna kan onderstaand statement weg
+ 
+--  IF l_wnu_list IS NULL THEN
+--  l_wnu_list := pk_xml_api.create_element('wnu', pk_xml_api.create_element('wnu_id',r_pin.wnu_id) || 
+--                   pk_xml_api.create_save_element('wnu_nr',r_pin.wnu_nr) ||
+--                   pk_xml_api.create_save_element('wnu_description',r_pin.wnu_description));
+--  END IF;
+ 
+ 
+  l_wnu_list := pk_xml_api.create_element('wbs_list',l_wnu_list);   
+ 
+  l_response := pk_xml_api.create_element('process', 
+            pk_xml_api.create_element('proc_id',r_pin.proc_id)  ||
+            pk_xml_api.create_save_element('proc_name',r_pin.proc_name)   ||
+            pk_xml_api.create_element('pro_id',r_pin.pro_id) ||
+            pk_xml_api.create_element('com_id',r_pin.com_id) ||
+            pk_xml_api.create_save_element('com_name',r_pin.com_name) ||
+            pk_xml_api.create_element('com_type',r_pin.com_type) ||            
+            pk_xml_api.create_element('agr_id',r_pin.agr_id) ||
+            pk_xml_api.create_save_element('agr_po_nr',r_pin.agr_po_nr) ||
+            pk_xml_api.create_save_element('agr_description',r_pin.agr_description) ||
+            l_wnu_list ||
+            --pk_xml_api.create_element('wnu_id',r_pin.wnu_id) ||
+            --pk_xml_api.create_save_element('wnu_nr',r_pin.wnu_nr) ||
+            --pk_xml_api.create_save_element('wnu_description',r_pin.wnu_description) ||               
+            pk_xml_api.create_save_element('description',r_pin.description) ||             
+            pk_xml_api.create_save_element('subject',r_pin.subject) ||  
+            pk_xml_api.create_element('reply_before',to_char(r_pin.reply_before,'dd-mm-yyyy')) ||       
+            pk_xml_api.create_save_element('response',r_pin.response) || 
+            pk_xml_api.create_element('nr',r_pin.nr) ||
+            pk_xml_api.create_element('use_id',r_pin.use_id) ||
+            pk_xml_api.create_save_element('use_name',r_pin.use_name) ||   
+            pk_xml_api.create_element('dest_use_id',r_pin.dest_use_id) ||
+            pk_xml_api.create_save_element('dest_use_name',r_pin.dest_use_name) ||             
+            pk_xml_api.create_element('date_started',to_char(r_pin.date_started,'dd-mm-yyyy hh24:mi:ss')) || 
+            pk_xml_api.create_element('date_finished',to_char(r_pin.date_finished,'dd-mm-yyyy hh24:mi:ss')) 
+                                  );
+ 
+RETURN l_response;
+END;
+FUNCTION GET_PROCESS_INFO_DA
+ (P_PIN_ID IN NUMBER
+ )
+ RETURN VARCHAR2
+ IS
+-- process info
+-- alleen voor DA
+ 
+CURSOR c_pin IS
+  SELECT dap.pro_id       pro_id 
+  ,      pin.com_id       com_id
+  ,      com.name         com_name  
+  ,      com.type         com_type
+  ,      dap.subject      subject
+  ,      pk_da.get_formatted_da_nr(p_id=>dap.id)  nr  
+  ,      dap.dot_id                               dot_id
+  ,      dap.doc_number                           doc_nr
+  ,      dap.revision_number                      revision_number
+  ,      dap.revision_comment                     revision_comment
+  ,      pin.use_id                               use_id
+  ,      use.name                                 use_name    
+  ,      pin.date_started                         date_started
+  ,      pin.date_finished                        date_finished   
+  ,      proc.id                                  proc_id
+  ,      proc.name                                proc_name  
+  FROM document_approvals dap
+  ,    process_instances  pin      
+  ,    processes          proc    
+  ,    users              use
+  ,    companies          com  
+  WHERE pin.ctx_id = dap.id  
+  AND   pin.use_id = use.id 
+  AND   pin.com_id = com.id 
+  AND   pin.id = p_pin_id    
+  AND   pin.proc_id = proc.id;
+r_pin c_pin%ROWTYPE;
+BEGIN
+  
+  OPEN c_pin;
+  FETCH c_pin INTO r_pin;
+  CLOSE c_pin;
+ 
+  RETURN pk_xml_api.create_element('process', 
+            pk_xml_api.create_element('proc_id',r_pin.proc_id)  ||
+            pk_xml_api.create_save_element('proc_name',r_pin.proc_name)   ||
+            pk_xml_api.create_element('pro_id',r_pin.pro_id) ||
+            pk_xml_api.create_element('com_id',r_pin.com_id) ||
+            pk_xml_api.create_save_element('com_name',r_pin.com_name) ||
+            pk_xml_api.create_element('com_type',r_pin.com_type) ||            
+            pk_xml_api.create_element('dot_id',r_pin.dot_id) || 
+            pk_xml_api.create_save_element('doc_nr',r_pin.doc_nr) || 
+            pk_xml_api.create_element('revision_number',r_pin.revision_number) || 
+            pk_xml_api.create_save_element('revision_comment',r_pin.revision_comment) ||
+            pk_xml_api.create_save_element('subject',r_pin.subject) ||                     
+            pk_xml_api.create_element('nr',r_pin.nr) ||
+            pk_xml_api.create_element('use_id',r_pin.use_id) ||
+            pk_xml_api.create_save_element('use_name',r_pin.use_name) ||  
+            pk_xml_api.create_element('date_started',to_char(r_pin.date_started,'dd-mm-yyyy hh24:mi:ss')) || 
+            pk_xml_api.create_element('date_finished',to_char(r_pin.date_finished,'dd-mm-yyyy hh24:mi:ss')) 
+                                  );
+END;
+FUNCTION GET_PROCESS_INFO_ECT
+ (P_PIN_ID IN NUMBER
+ )
+ RETURN VARCHAR2
+ IS
+-- process info
+-- alleen voor ECT
+ 
+l_response    CLOB;
+l_wnu_list    VARCHAR2(10000);
+ 
+CURSOR c_pin IS
+  SELECT ect.pro_id       pro_id 
+  ,      pin.com_id       com_id
+  ,      com.name         com_name  
+  ,      com.type         com_type
+  ,      ect.agr_id       agr_id     
+  ,      agr.po_nr        agr_po_nr
+  ,      agr.description  agr_description
+--  ,      wnu.id           wnu_id
+--  ,      wnu.nr           wnu_nr
+--  ,      wnu.description  wnu_description
+  ,      ect.subject      subject
+  ,      ect.description  description
+  ,      pk_ect.get_formatted_ect_nr(p_id=>ect.id)  nr  
+  ,      ect.rec_com_id                           rec_com_id
+  ,      aco.name                                 rec_com_name  
+  ,      ect.acc_use_id                           acc_use_id
+  ,      aus.name                                 acc_use_name    
+  ,      ect.issue_com_id                         issue_com_id
+  ,      ico.name                                 issue_com_name  
+  ,      ect.use_ect_id                           use_ect_id
+  ,      eus.name                                 use_ect_name    
+  ,      ect.target_date                          target_date
+  ,      ect.target_com_id                        target_com_id
+  ,      tco.name                                 target_com_name  
+  ,      pin.use_id                               use_id
+  ,      use.name                                 use_name    
+  ,      pin.date_started                         date_started
+  ,      pin.date_finished                        date_finished   
+  ,      proc.id                                  proc_id
+  ,      proc.name                                proc_name  
+  ,      ect.id                                   ect_id  
+  FROM ects               ect
+  ,    process_instances  pin      
+  ,    processes          proc    
+  ,    users              use
+  ,    companies          com  
+  ,    agreements         agr 
+--  ,    wbs_numbers        wnu 
+  ,    companies          aco  
+  ,    users              aus
+  ,    companies          ico  
+  ,    users              eus
+  ,    companies          tco  
+  WHERE pin.ctx_id = ect.id  
+  AND   pin.use_id = use.id 
+  AND   pin.com_id = com.id 
+  AND   ect.agr_id = agr.id 
+--  AND   ect.wnu_id = wnu.id (+)
+  AND   pin.id = p_pin_id    
+  AND   pin.proc_id = proc.id
+  AND   ect.rec_com_id = aco.id (+)
+  AND   ect.acc_use_id = aus.id (+) 
+  AND   ect.issue_com_id = ico.id (+) 
+  AND   ect.use_ect_id = eus.id (+)
+  AND   ect.target_com_id = tco.id; 
+r_pin c_pin%ROWTYPE;
+ 
+-- ect wbs numbers
+CURSOR c_ect_wbs (b_ect_id NUMBER) IS
+  SELECT ewb.wnu_id       wnu_id
+  ,      wbs.nr           wnu_nr
+  ,      wbs.description  wnu_description
+  FROM ect_wbs_numbers      ewb
+  ,    wbs_numbers          wbs
+  WHERE ewb.ect_id = b_ect_id
+  AND wbs.id = ewb.wnu_id
+  ORDER BY ewb.wnu_id;
+BEGIN
+  
+  OPEN c_pin;
+  FETCH c_pin INTO r_pin;
+  CLOSE c_pin;
+ 
+  l_response := NULL;
+  l_wnu_list := NULL;
+ 
+  FOR r_ect_wbs IN c_ect_wbs (r_pin.ect_id) LOOP
+     l_wnu_list := l_wnu_list || pk_xml_api.create_element('wnu', pk_xml_api.create_element('wnu_id',r_ect_wbs.wnu_id) || 
+                   pk_xml_api.create_save_element('wnu_nr',r_ect_wbs.wnu_nr) ||
+                   pk_xml_api.create_save_element('wnu_description',r_ect_wbs.wnu_description)); 
+  END LOOP;   
+ 
+  -- Nog een conversie uitvoeren van ects naar ect_wbs_numbers
+  -- Daarna kan onderstaand statement weg
+ 
+--  IF l_wnu_list IS NULL THEN
+--  l_wnu_list := pk_xml_api.create_element('wnu', pk_xml_api.create_element('wnu_id',r_pin.wnu_id) || 
+--                   pk_xml_api.create_save_element('wnu_nr',r_pin.wnu_nr) ||
+--                   pk_xml_api.create_save_element('wnu_description',r_pin.wnu_description));
+--  END IF;
+ 
+ 
+  l_wnu_list := pk_xml_api.create_element('wbs_list',l_wnu_list);   
+ 
+  l_response := pk_xml_api.create_element('process', 
+            pk_xml_api.create_element('proc_id',r_pin.proc_id)  ||
+            pk_xml_api.create_save_element('proc_name',r_pin.proc_name)   ||
+            pk_xml_api.create_element('pro_id',r_pin.pro_id) ||
+            pk_xml_api.create_element('com_id',r_pin.com_id) ||
+            pk_xml_api.create_save_element('com_name',r_pin.com_name) ||
+            pk_xml_api.create_element('com_type',r_pin.com_type) ||            
+            pk_xml_api.create_element('agr_id',r_pin.agr_id) ||
+            pk_xml_api.create_save_element('agr_po_nr',r_pin.agr_po_nr) ||
+            pk_xml_api.create_save_element('agr_description',r_pin.agr_description) ||
+            l_wnu_list ||
+            -- pk_xml_api.create_element('wbs_list',pk_xml_api.create_element('wnu_id',r_pin.wnu_id) ||
+            -- pk_xml_api.create_save_element('wnu_nr',r_pin.wnu_nr) ||
+            -- pk_xml_api.create_save_element('wnu_description',r_pin.wnu_description)) ||               
+            pk_xml_api.create_save_element('description',r_pin.description) ||   
+            pk_xml_api.create_element('rec_com_id',r_pin.rec_com_id) || 
+            pk_xml_api.create_save_element('rec_com_name',r_pin.rec_com_name) ||
+            pk_xml_api.create_element('acc_use_id',r_pin.acc_use_id) || 
+            pk_xml_api.create_save_element('acc_use_name',r_pin.acc_use_name) ||  
+            pk_xml_api.create_element('issue_com_id',r_pin.issue_com_id) || 
+            pk_xml_api.create_save_element('issue_com_name',r_pin.issue_com_name) ||
+            pk_xml_api.create_element('use_ect_id',r_pin.use_ect_id) || 
+            pk_xml_api.create_save_element('use_ect_name',r_pin.use_ect_name) ||  
+            pk_xml_api.create_save_element('subject',r_pin.subject) ||  
+            pk_xml_api.create_element('target_date',to_char(r_pin.target_date,'dd-mm-yyyy hh24:mi:ss')) || 
+            pk_xml_api.create_element('target_com_id',r_pin.target_com_id) || 
+            pk_xml_api.create_save_element('target_com_name',r_pin.target_com_name) ||                   
+            pk_xml_api.create_element('nr',r_pin.nr) ||
+            pk_xml_api.create_element('use_id',r_pin.use_id) ||
+            pk_xml_api.create_save_element('use_name',r_pin.use_name) ||  
+            pk_xml_api.create_element('date_started',to_char(r_pin.date_started,'dd-mm-yyyy hh24:mi:ss')) || 
+            pk_xml_api.create_element('date_finished',to_char(r_pin.date_finished,'dd-mm-yyyy hh24:mi:ss')) 
+                                  );
+ 
+  RETURN l_response;
+END;
+FUNCTION GET_PROCESS_INFO_PAC
+ (P_PIN_ID IN NUMBER
+ )
+ RETURN CLOB
+ IS
+-- process info
+-- alleen voor Packages
+ 
+l_response    CLOB;
+l_pack_wnu    VARCHAR2(10000);
+ 
+CURSOR c_pin IS
+SELECT   pac.pro_id                                 pro_id 
+  ,      pin.com_id                                 com_id
+  ,      com.name                                   com_name  
+  ,      com.type                                   com_type
+--  ,      pwn.wnu_id                                 wnu_id
+--  ,      NULL                                       wnu_nr
+--  ,      NULL                                       wnu_description
+  ,      pac.subject                                subject
+  ,      pac.pack_number                            package_number
+  ,      pk_pac.get_formatted_pac_nr(p_id=>pac.id)  nr  
+  ,      pin.use_id                                 use_id
+  ,      use.name                                   use_name    
+  ,      pin.date_started                           date_started
+  ,      pin.date_finished                          date_finished   
+  ,      proc.id                                    proc_id
+  ,      proc.name                                  proc_name   
+  ,      pac.pack_use_id                            pack_use_id
+  ,      pmg.name                                   pack_use_name    
+  ,      pac.id                                     pac_id  
+  FROM packages             pac
+  ,    process_instances    pin      
+  ,    processes            proc    
+  ,    users                use
+  ,    users                pmg
+  ,    companies            com
+--  ,    package_wbs_numbers  pwn
+  WHERE pin.ctx_id = pac.id  
+  AND   pin.use_id = use.id 
+  AND   pin.com_id = com.id 
+--  AND   pac.id = pwn.pac_id (+)
+  AND   pac.pack_use_id = pmg.id 
+  AND   pin.id = p_pin_id    
+  AND   pin.proc_id = proc.id;
+r_pin c_pin%ROWTYPE;  
+ 
+-- package wbs numbers
+CURSOR c_pac_wbs (b_pac_id NUMBER) IS
+  SELECT pwb.wnu_id       pack_wnu_id
+  ,      wbs.nr           pack_wnu_nr
+  ,      wbs.description  pack_wnu_description
+  FROM package_wbs_numbers  pwb
+  ,    wbs_numbers          wbs
+  WHERE pwb.pac_id = b_pac_id
+  AND wbs.id = pwb.wnu_id
+  ORDER BY pwb.wnu_id;
+BEGIN
+  
+  OPEN c_pin;
+  FETCH c_pin INTO r_pin;
+  CLOSE c_pin;
+  
+  
+  l_response := NULL;
+  l_pack_wnu := NULL;
+ 
+  FOR r_pac_wbs IN c_pac_wbs (r_pin.pac_id) LOOP
+     l_pack_wnu := l_pack_wnu || pk_xml_api.create_element('wbs_number', pk_xml_api.create_element('wnu_id',r_pac_wbs.pack_wnu_id) || 
+                   pk_xml_api.create_save_element('nr',r_pac_wbs.pack_wnu_nr) ||
+                   pk_xml_api.create_save_element('description',r_pac_wbs.pack_wnu_description)); 
+  END LOOP;   
+ 
+  l_pack_wnu := pk_xml_api.create_element('wbs_numbers',l_pack_wnu);   
+  
+  l_response := pk_xml_api.create_element('process', 
+            pk_xml_api.create_element('proc_id',r_pin.proc_id)  ||
+            pk_xml_api.create_save_element('proc_name',r_pin.proc_name)   ||
+            pk_xml_api.create_element('pro_id',r_pin.pro_id) ||
+            pk_xml_api.create_element('com_id',r_pin.com_id) ||
+            pk_xml_api.create_save_element('com_name',r_pin.com_name) ||
+            pk_xml_api.create_element('com_type',r_pin.com_type) ||            
+            l_pack_wnu ||
+            pk_xml_api.create_save_element('subject',r_pin.subject) ||  
+            pk_xml_api.create_element('package_number',r_pin.package_number) ||
+            pk_xml_api.create_element('nr',r_pin.nr) ||
+            pk_xml_api.create_element('use_id',r_pin.use_id) ||
+            pk_xml_api.create_save_element('use_name',r_pin.use_name) ||  
+            pk_xml_api.create_element('pack_use_id',r_pin.pack_use_id) ||
+            pk_xml_api.create_save_element('pack_use_name',r_pin.pack_use_name) ||  
+            pk_xml_api.create_element('date_started',to_char(r_pin.date_started,'dd-mm-yyyy hh24:mi:ss')) || 
+            pk_xml_api.create_element('date_finished',to_char(r_pin.date_finished,'dd-mm-yyyy hh24:mi:ss')) 
+                                  );
+  
+  RETURN l_response;
+END;
+FUNCTION GET_PROCESS_INFO_EI
+ (P_PIN_ID IN NUMBER
+ )
+ RETURN CLOB
+ IS
+-- process info
+-- alleen voor Enigineering Instructions
+ 
+l_response    CLOB;
+l_wnu_list    VARCHAR2(10000);
+ 
+CURSOR c_pin IS
+SELECT   eis.pro_id                                 pro_id 
+  ,      pin.com_id                                 com_id
+  ,      com.name                                   com_name  
+  ,      com.type                                   com_type
+  ,      eis.subject                                subject
+  ,      eis.description                            description
+  ,      pk_ei.get_formatted_ei_nr(p_id=>eis.id)    nr  
+  ,      eis.rec_com_id                             rec_com_id
+  ,      aco.name                                   rec_com_name  
+  ,      eis.acc_use_id                             acc_use_id
+  ,      aus.name                                   acc_use_name    
+  ,      pin.use_id                                 use_id
+  ,      use.name                                   use_name    
+  ,      pin.date_started                           date_started
+  ,      pin.date_finished                          date_finished   
+  ,      proc.id                                    proc_id
+  ,      proc.name                                  proc_name   
+  ,      eis.id                                     eis_id  
+  FROM eis                  eis
+  ,    process_instances    pin      
+  ,    processes            proc    
+  ,    users                use
+  ,    companies            com
+  ,    companies            aco  
+  ,    users                aus
+  WHERE pin.ctx_id = eis.id  
+  AND   pin.use_id = use.id 
+  AND   pin.com_id = com.id 
+  AND   pin.id = p_pin_id    
+  AND   pin.proc_id = proc.id
+  AND   eis.rec_com_id = aco.id 
+  AND   eis.acc_use_id = aus.id (+);
+r_pin c_pin%ROWTYPE;
+ 
+-- ei wbs numbers
+CURSOR c_ei_wbs (b_eis_id NUMBER) IS
+  SELECT ewb.wnu_id       wnu_id
+  ,      wbs.nr           wnu_nr
+  ,      wbs.description  wnu_description
+  FROM ei_wbs_numbers       ewb
+  ,    wbs_numbers          wbs
+  WHERE ewb.eis_id = b_eis_id
+  AND wbs.id = ewb.wnu_id
+  ORDER BY ewb.wnu_id;
+BEGIN
+  
+  OPEN c_pin;
+  FETCH c_pin INTO r_pin;
+  CLOSE c_pin;
+  
+  
+  l_response := NULL;
+  l_wnu_list := NULL;
+ 
+  FOR r_ei_wbs IN c_ei_wbs (r_pin.eis_id) LOOP
+     l_wnu_list := l_wnu_list || pk_xml_api.create_element('wnu', pk_xml_api.create_element('wnu_id',r_ei_wbs.wnu_id) || 
+                   pk_xml_api.create_save_element('wnu_nr',r_ei_wbs.wnu_nr) ||
+                   pk_xml_api.create_save_element('wnu_description',r_ei_wbs.wnu_description)); 
+  END LOOP;   
+ 
+  l_wnu_list := pk_xml_api.create_element('wbs_list',l_wnu_list);   
+  
+  l_response := pk_xml_api.create_element('process', 
+            pk_xml_api.create_element('proc_id',r_pin.proc_id)  ||
+            pk_xml_api.create_save_element('proc_name',r_pin.proc_name)   ||
+            pk_xml_api.create_element('pro_id',r_pin.pro_id) ||
+            pk_xml_api.create_element('com_id',r_pin.com_id) ||
+            pk_xml_api.create_save_element('com_name',r_pin.com_name) ||
+            pk_xml_api.create_element('com_type',r_pin.com_type) ||            
+            l_wnu_list ||
+            pk_xml_api.create_save_element('subject',r_pin.subject) ||  
+            pk_xml_api.create_save_element('description',r_pin.description) ||   
+            pk_xml_api.create_element('nr',r_pin.nr) ||
+            pk_xml_api.create_element('rec_com_id',r_pin.rec_com_id) || 
+            pk_xml_api.create_save_element('rec_com_name',r_pin.rec_com_name) ||
+            pk_xml_api.create_element('acc_use_id',r_pin.acc_use_id) ||
+            pk_xml_api.create_save_element('acc_use_name',r_pin.acc_use_name) ||  
+            pk_xml_api.create_element('date_started',to_char(r_pin.date_started,'dd-mm-yyyy hh24:mi:ss')) || 
+            pk_xml_api.create_element('date_finished',to_char(r_pin.date_finished,'dd-mm-yyyy hh24:mi:ss')) 
+           );
+  
+  RETURN l_response;
+END;
+FUNCTION GET_TIN_FILE_LIST
+ (P_TIN_ID IN VARCHAR2
+ )
+ RETURN VARCHAR2
+ IS
+-- get a list of tin documents
+ 
+l_response CLOB;
+ 
+-- tin document info
+CURSOR c_tdo IS
+  SELECT tdo.id
+  ,      tdo.filename
+  ,      tdo.doc_size
+  ,      tdo.timestamp
+  ,      tdo.doc_comment 
+  FROM tin_documents tdo
+  WHERE tdo.tin_id = p_tin_id;
+ 
+-- count   
+l_count NUMBER := 0;
+BEGIN
+ 
+  -- file info
+  FOR r_tdo IN c_tdo LOOP   
+    l_count := l_count + 1;
+    l_response := l_response || 
+       pk_xml_api.create_element('file',
+          pk_xml_api.create_element('tdo_id',r_tdo.id) ||      
+          pk_xml_api.create_save_element('filename',r_tdo.filename) || 
+          pk_xml_api.create_element('doc_size',r_tdo.doc_size) ||
+          pk_xml_api.create_save_element('doc_comment',r_tdo.doc_comment)  ||
+          pk_xml_api.create_element('timestamp',to_char(r_tdo.timestamp,'dd-mm-yyyy hh24:mi:ss')) ||  
+          pk_xml_api.create_element('timestamp_since',APEX_UTIL.GET_SINCE_TSWLTZ(r_tdo.timestamp))                   
+                                );
+  END LOOP;  
+  
+  RETURN pk_xml_api.create_element('tin_files',
+                             pk_xml_api.create_element('count',l_count) ||
+                             l_response
+                                  );  
+ 
+END;
+FUNCTION GET_TASK_INFO
+ (P_TIN_ID IN NUMBER
+ ,P_DATA IN VARCHAR2 := null
+ )
+ RETURN VARCHAR2
+ IS
+-- Get task info
+ 
+ CURSOR c_task IS
+   SELECT alt.*
+   ,      pta.description       pta_description
+   ,      pta.button_text       pta_button_text
+   ,      pta.display_text      pta_display_text     
+   ,      pta.display_text_alt  pta_display_text_alt
+   FROM vw_all_tasks  alt
+   ,    process_tasks pta
+   WHERE alt.tin_id = p_tin_id
+   AND   alt.pta_id = pta.id;
+ r_task c_task%ROWTYPE;
+BEGIN
+  
+  OPEN c_task;
+  FETCH c_task INTO r_task;
+  CLOSE c_task;
+ 
+  RETURN pk_xml_api.create_element('task', 
+            pk_xml_api.create_element('proc_id',r_task.proc_id) ||
+            pk_xml_api.create_save_element('proc_name',r_task.proc_name) ||
+            pk_xml_api.create_element('pin_id',r_task.pin_id) ||   
+            pk_xml_api.create_element('tin_id',r_task.tin_id) ||
+            pk_xml_api.create_element('pro_id',r_task.pro_id) ||
+            pk_xml_api.create_element('pin_use_id_created',r_task.pin_use_id_created) ||  
+            pk_xml_api.create_save_element('pin_name_created',r_task.pin_name_created) ||              
+            pk_xml_api.create_element('tin_use_id_created',r_task.tin_use_id_created) || 
+            pk_xml_api.create_save_element('tin_name_created',r_task.tin_name_created) ||  
+            pk_xml_api.create_element('tin_use_id_execute',r_task.tin_use_id_execute) || 
+            pk_xml_api.create_save_element('tin_name_execute',r_task.tin_name_execute) ||  
+            pk_xml_api.create_element('tin_date_started',to_char(r_task.tin_date_started,'dd-mm-yyyy hh24:mi:ss')) || 
+            pk_xml_api.create_element('tin_date_finished',to_char(r_task.tin_date_finished,'dd-mm-yyyy hh24:mi:ss')) ||  
+            pk_xml_api.create_element('tin_date_started_since',APEX_UTIL.GET_SINCE_TSWLTZ(r_task.tin_date_started)) ||    
+            pk_xml_api.create_element('tin_date_finished_since',APEX_UTIL.GET_SINCE_TSWLTZ(r_task.tin_date_finished)) ||    
+            pk_xml_api.create_save_element('tin_task_comment',r_task.tin_task_comment) || 
+            pk_xml_api.create_save_element('pta_name',r_task.pta_name) ||                
+            pk_xml_api.create_save_element('pta_description',r_task.pta_description) ||    
+            pk_xml_api.create_save_element('pta_button_text',r_task.pta_button_text) ||    
+            pk_xml_api.create_save_element('pta_display_text',r_task.pta_display_text) ||       
+            pk_xml_api.create_save_element('pta_display_text_alt',r_task.pta_display_text_alt) ||       
+            pk_xml_api.create_save_element('sta_from_name',r_task.sta_from_name) ||  
+            pk_xml_api.create_element('sta_from_type',r_task.sta_from_type) ||
+            pk_xml_api.create_save_element('sta_to_name',r_task.sta_to_name) ||
+            pk_xml_api.create_element('sta_to_type',r_task.sta_to_type) ||
+            pk_xml_api.create_element('nr',pk_wf_api.get_ctx_nr(p_pin_id=>r_task.pin_id)) ||
+            pk_xml_api.create_save_element('subject',pk_wf_api.get_ctx_subject(p_pin_id=>r_task.pin_id))
+            || pk_wf_api.get_tin_file_list(p_tin_id => p_tin_id)
+            || p_data -- extra optional data to be included in the task tag
+                                  );
+END;
+FUNCTION GET_CTX_NR
+ (P_PIN_ID IN NUMBER
+ )
+ RETURN VARCHAR2
+ IS
+-- get context info
+ 
+-- to do: generieker maken van get context info: in processes: veld opnemen met de functie call
+-- , te gebruiken in pk_workflow.get_ctx_info ipv if then else lijst.
+-- eigenlijk moeten de velden allemaal uit pin komen)sbject, nr, description, etc)
+ 
+l_info  VARCHAR2(1000);
+l_id    NUMBER;
+l_table VARCHAR2(100);
+ 
+CURSOR c_ctx IS
+  SELECT pin.ctx_id     id
+  ,      proc.ctx_table tab
+  FROM process_instances pin
+  ,    processes         proc
+  WHERE pin.id = p_pin_id
+  AND   pin.proc_id = proc.id;
+BEGIN
+  
+  -- get ctx info
+  OPEN c_ctx;
+  FETCH c_ctx INTO l_id
+              ,    l_table;
+  CLOSE c_ctx;
+  
+  IF UPPER(l_table) = 'SITE_INSTRUCTIONS' THEN
+    l_info := pk_si.get_formatted_si_nr(p_id=>l_id);  
+  ELSIF UPPER(l_table) = 'INFORMATION_REQUESTS' THEN
+    l_info := pk_ir.get_formatted_ir_nr(p_id=>l_id); 
+  ELSIF UPPER(l_table) = 'DOCUMENT_APPROVALS' THEN
+      l_info := pk_da.get_formatted_da_nr(p_id=>l_id);  
+  ELSIF UPPER(l_table) = 'ECTS' THEN
+      l_info := pk_ect.get_formatted_ect_nr(p_id=>l_id);      
+  ELSIF UPPER(l_table) = 'PACKAGES' THEN
+      l_info := pk_pac.get_formatted_pac_nr(p_id=>l_id);                          
+  ELSIF UPPER(l_table) = 'EIS' THEN
+      l_info := pk_ei.get_formatted_ei_nr(p_id=>l_id);                          
+  ELSE
+    l_info := 'n.a.';
+  END IF;
+  
+  RETURN l_info;
+    
+END;
+FUNCTION GET_CTX_SUBJECT
+ (P_PIN_ID IN NUMBER
+ )
+ RETURN VARCHAR2
+ IS
+-- get context subject
+ 
+-- to do: generieker maken van get context info: in processes: veld opnemen met de functie call
+-- , te gebruiken in pk_workflow.get_ctx_info ipv if then else lijst.   
+-- eigenlijk moeten de velden allemaal uit pin komen)sbject, nr, description, etc)
+ 
+ 
+l_info  VARCHAR2(1000);
+l_id    NUMBER;
+l_table VARCHAR2(100);
+ 
+CURSOR c_ctx IS
+  SELECT pin.ctx_id     id
+  ,      proc.ctx_table tab
+  FROM process_instances pin
+  ,    processes         proc
+  WHERE pin.id = p_pin_id
+  AND   pin.proc_id = proc.id;
+BEGIN
+  
+  -- get ctx info
+  OPEN c_ctx;
+  FETCH c_ctx INTO l_id
+              ,    l_table;
+  CLOSE c_ctx;
+  
+  IF UPPER(l_table) = 'SITE_INSTRUCTIONS' THEN
+    SELECT subject
+    INTO l_info
+    FROM site_instructions
+    WHERE id = l_id; 
+  ELSIF UPPER(l_table) = 'INFORMATION_REQUESTS' THEN
+    SELECT subject
+    INTO l_info
+    FROM information_requests
+    WHERE id = l_id;   
+  ELSIF UPPER(l_table) = 'DOCUMENT_APPROVALS' THEN
+    SELECT subject
+    INTO l_info
+    FROM document_approvals
+    WHERE id = l_id;  
+  ELSIF UPPER(l_table) = 'ECTS' THEN
+    SELECT subject
+    INTO l_info
+    FROM ects
+    WHERE id = l_id;    
+  ELSIF UPPER(l_table) = 'PACKAGES' THEN
+    SELECT subject
+    INTO l_info
+    FROM packages
+    WHERE id = l_id;                    
+  ELSIF UPPER(l_table) = 'EIS' THEN
+    SELECT subject
+    INTO l_info
+    FROM eis
+    WHERE id = l_id;                    
+  ELSE
+    l_info := 'n.a.';
+  END IF;
+  
+  RETURN l_info;
+  
+END;
+PROCEDURE EXECUTE_TASK
+ (P_TIN_ID IN NUMBER
+ ,P_USE_ID IN NUMBER
+ ,P_NEXT_PTA IN APEX_APPLICATION_GLOBAL.VC_ARR2
+ ,P_NEXT_USE IN APEX_APPLICATION_GLOBAL.VC_ARR2
+ ,P_TASK_COMMENT IN VARCHAR2
+ )
+ IS
+-- Execute a task 
+   
+-- Execute task allowed?
+-- Update tin with date_finished     
+-- Create_next_task(s)    
+ 
+-- to do:
+-- If next tasks are empty AND state_to = End then end the process. afhankelijk van merge type? 
+--        - type knooppunt:            
+--        -      alles moet afgehandeld zijn, dan 1 verder
+--        -      als iets afgehandeld is dan 1 verder, ook voor latere (default?)
+--        -      als iets afgehandeld is dan 1 verder, niet voor latere, uitdoven
+--        - rekening houden met aantal inkomende: tellen
+--        - aantal parallel opgestarte: in elke task_instance opgeslagen 
+--     Wie is de volgende user na zo'n knooppunt? use_of_pta_id in process_task definition, de user die opgegevenn is (null? = role?) 
+-- Bij merge_task: misschien er er helemaal geen vervolg mogelijk, dus end punt en merge
+ 
+l_error VARCHAR2(4000);
+ 
+-- pta info
+CURSOR c_pta IS
+  SELECT pta_id
+  FROM task_instances tin
+  WHERE tin.id = p_tin_id;
+l_pta_id NUMBER;
+BEGIN
+ 
+-- Get all pta info
+OPEN c_pta;
+FETCH c_pta INTO l_pta_id;
+CLOSE c_pta;
+ 
+    
+-- user allowed to execute this task?
+IF pk_wf_api.is_current_user_task( p_tin_id => p_tin_id
+                                 , p_use_id => p_use_id ) = 'Y' THEN  
+                                       
+   -- update tin
+   UPDATE task_instances 
+   SET use_id_execute = p_use_id
+   ,   date_finished  = sysdate
+   ,   task_comment   = p_task_comment
+   WHERE id = p_tin_id;
+    
+   -- Create next task(s)                                              
+   IF p_next_pta.count >= 1 THEN
+   
+      FOR i IN 1 .. p_next_pta.count LOOP 
+  
+        pk_wf_api.create_next_task ( p_tin_id => p_tin_id 
+                                   , p_use_id => p_use_id
+                                   , p_next_pta_id => p_next_pta(i)
+                                   , p_next_use_id => p_next_use(i) );
+      END LOOP;
+  
+   -- no next tasks, check if to_state is End type
+   ELSE   
+          
+     IF pk_wf_api.is_end_task (p_pta_id => l_pta_id) = 'Y' THEN
+        -- End this process
+        pk_wf_api.end_process(p_tin_id => p_tin_id);      
+     END IF;     
+   END IF;
+   
+   
+   COMMIT;  
+ 
+-- Wrong user is trying to execute the task
+ELSE
+    pk_log.log_message( p_module  => 'pk_wf_api.execute_task'
+                      , p_message => 'Executing task not allowed, p_use_id:'||p_use_id||' p_tin_id:'||p_tin_id );  
+    raise_application_error( -20001, 'Executing this task is not allowed.' );
+END IF;
+ 
+         
+EXCEPTION WHEN OTHERS THEN    
+    l_error := SQLERRM;
+    pk_log.log_message( p_module  => 'pk_wf_api.execute_task'
+                      , p_message => 'Unexpected error, error:'||substr(l_error,1,3000) || ' p_use_id:'||p_use_id ||' p_tin_id:'||p_tin_id );  
+    raise_application_error( -20001, 'Unexpected error when executing this task.' );
+END;
+FUNCTION IS_CURRENT_USER_TASK
+ (P_TIN_ID IN NUMBER
+ ,P_USE_ID IN NUMBER := v('G_USE_ID')
+ )
+ RETURN VARCHAR2
+ IS
+-- Determine if the tin_id can be executed for this user
+  
+  l_dummy  NUMBER;
+  
+CURSOR c_vuct IS  
+  SELECT 1
+  FROM vw_use_current_tasks
+  WHERE tin_id = p_tin_id
+  AND   use_id = p_use_id;
+BEGIN
+ 
+  OPEN c_vuct;
+  FETCH c_vuct INTO l_dummy;
+  CLOSE c_vuct;
+   
+   IF l_dummy = 1  THEN       --OR v('G_IND_ADMIN')='Y'
+     RETURN 'Y';
+   ELSE 
+     RETURN 'N';
+   END IF;
+             
+END;
+PROCEDURE CREATE_TASK
+ (P_PIN_ID IN NUMBER
+ ,P_PTA_ID IN NUMBER
+ ,P_USE_ID IN VARCHAR2 := v('G_USE_ID')
+ ,P_NEXT_USE_ID IN NUMBER := null
+ )
+ IS
+-- Create a task  
+-- Called from 
+-- - create_next_task
+-- - start_process
+ 
+-- if the created task is of type Machine then Execute the program
+--  first solve user problem for system task
+ 
+CURSOR c_pta IS
+  SELECT task_type
+  FROM process_tasks
+  WHERE id = p_pta_id;
+ 
+l_task_type   VARCHAR2(1);
+l_tin_id      NUMBER;
+l_pin_id      NUMBER;
+BEGIN
+  
+  -- Determine task type
+  OPEN c_pta;
+  FETCH c_pta INTO l_task_type;
+  CLOSE c_pta;  
+    
+  -- create task
+  l_tin_id := seq_all.NEXTVAL;
+  INSERT INTO task_instances
+   ( id
+   , pin_id
+   , pta_id 
+   , use_id_created 
+   , use_id_execute ) VALUES
+     ( l_tin_id
+     , p_pin_id   
+     , p_pta_id 
+     , p_use_id
+     , p_next_use_id );               
+  
+  -- Machine task
+  IF l_task_type = 'M' THEN
+   -- pk_wf_api.execute_machine_task( p_tin_id => l_tin_id );    To do!
+   null;
+  END IF;  
+   
+ END;
+PROCEDURE CREATE_NEXT_TASK
+ (P_TIN_ID IN NUMBER
+ ,P_USE_ID IN NUMBER := v('G_USE_ID')
+ ,P_NEXT_USE_ID IN NUMBER := null
+ ,P_NEXT_PTA_ID IN NUMBER
+ )
+ IS
+-- create next task(s)   
+-- called after execute_task 
+--              execute_machine_task
+ 
+-- to do:  
+-- Controleer of deze taak (p_next_pta_id) wel een vervolg is op de vorige (tin_id) en of de volgende gebruiker de volgende taak wel uit mag voeren  
+-- mbt com_id/pro_id
+-- to do: check if previous task(S!!) is completed?  Misschien niet nodig...
+-- nr_times doorgeven ivm 
+ 
+l_next_use_id NUMBER;                      
+ 
+CURSOR c_tin IS
+  SELECT tin.pin_id
+  FROM task_instances tin
+  WHERE tin.id = p_tin_id;
+ 
+l_pin_id NUMBER;
+BEGIN
+   
+   -- Tin info
+   OPEN c_tin;
+   FETCH c_tin INTO l_pin_id;
+   CLOSE c_tin;
+   
+   -- Create the task
+   pk_wf_api.create_task ( p_pin_id => l_pin_id
+                         , p_use_id => p_use_id
+                         , p_pta_id => p_next_pta_id     
+                         , p_next_use_id => p_next_use_id ); 
+END;
+FUNCTION IS_END_TASK
+ (P_PTA_ID IN NUMBER
+ )
+ RETURN VARCHAR2
+ IS
+-- Determine if this pta_id task is the last of a process
+  
+  l_state_type VARCHAR2(1);
+  
+CURSOR c_pta IS  
+  SELECT sta.state_type
+  FROM process_tasks pta 
+  ,    states        sta
+  WHERE pta.to_sta_id = sta.id
+  AND   pta.id = p_pta_id;
+BEGIN
+ 
+  OPEN c_pta;
+  FETCH c_pta INTO l_state_type;
+  CLOSE c_pta;
+   
+   IF l_state_type = 'E' THEN   
+     RETURN 'Y';
+   ELSE 
+     RETURN 'N';
+   END IF;
+             
+END;
+PROCEDURE END_PROCESS
+ (P_TIN_ID IN NUMBER
+ )
+ IS
+-- End the process
+--  after execute_task 
+ 
+l_pin_id NUMBER;
+BEGIN
+  
+  -- determine pin_id
+  SELECT tin.pin_id
+  INTO l_pin_id
+  FROM task_instances tin
+  WHERE tin.id = p_tin_id;
+  
+  -- set date_finished 
+  UPDATE process_instances 
+  SET date_finished = sysdate
+  WHERE id = l_pin_id;
+  
+  COMMIT;
+    
+END;
+FUNCTION GET_NEXT_TASK_INFO
+ (P_TIN_ID IN NUMBER
+ ,P_USE_ID IN NUMBER
+ ,P_PRO_ID IN NUMBER
+ )
+ RETURN CLOB
+ IS
+-- Determine the next tasks, given a tin_id
+-- only return info if this user may see it (incorporate g_use_id in the query)
+--!!! see pk_workflow.generate_next_task_query for to do's, now only simple ANDs !!! 
+--!!! also nr_times = 1 for now !!!
+ 
+ l_pta_id   NUMBER;
+ l_pin_id   NUMBER; 
+ l_ind_tin  NUMBER; 
+ l_ind_and  VARCHAR2(1);         
+ l_task     VARCHAR2(20000);
+ l_tasks    VARCHAR2(20000); 
+ l_users    VARCHAR2(10000);    
+ l_share_users VARCHAR2(10000);
+ l_response CLOB;  
+ 
+ 
+-- tin check for this user 
+CURSOR c_tin IS
+  SELECT 1
+  FROM vw_use_current_tasks vuct
+  WHERE vuct.use_id = p_use_id -- for this user  
+  AND   vuct.tin_id = p_tin_id; 
+ 
+-- pta/pin info
+CURSOR c_pta IS
+  SELECT pta_id 
+  ,      pin_id
+  FROM task_instances tin
+  WHERE tin.id = p_tin_id;
+ 
+-- And
+CURSOR c_and IS
+  SELECT pta_to.name          pta_name   
+  ,      pta_to.task_label    task_label
+  ,      pta_to.id            pta_id
+  ,      pta_to.use_of_pta_id     use_of_pta_id 
+  ,      pta_to.com_of_pta_id     com_of_pta_id  
+  ,      pta_to.not_com_of_pta_id not_com_of_pta_id
+  FROM process_tasks pta_to  
+  ,    process_tasks pta_from
+  ,    states        sta
+  WHERE pta_from.id = l_pta_id
+  AND   pta_from.to_sta_id = pta_to.from_sta_id
+  AND   sta.id = pta_to.to_sta_id
+  AND   pta_to.split_type = 'A'
+  ORDER BY sta.name;   
+ 
+-- Users
+CURSOR c_use ( b_pta_id NUMBER
+             , b_pin_id NUMBER
+             , b_use_of_pta_id NUMBER
+             , b_com_of_pta_id NUMBER
+             , b_not_com_of_pta_id NUMBER
+             , b_pta_name VARCHAR2 ) IS 
+  SELECT DISTINCT vupt.use_name name
+  ,      vupt.use_id            id
+  FROM vw_use_pro_pta_active vupt 
+  WHERE vupt.ind_active = 'Y' 
+  AND   vupt.pro_id = p_pro_id   
+  AND   vupt.pta_id = b_pta_id 
+  AND ( ( vupt.use_id = ( SELECT tin.use_id_execute  -- previous user who executed a previous task
+                          FROM task_instances tin
+                          WHERE tin.pta_id = b_use_of_pta_id
+                          AND   tin.pin_id = b_pin_id )
+           AND
+            b_use_of_pta_id IS NOT NULL 
+          )
+        OR
+         ( b_use_of_pta_id IS NULL )
+        )
+  AND ( ( vupt.com_id = ( SELECT use.com_id         -- previous company users of the user who executed a previous task
+                          FROM task_instances tin2 
+                          ,    users          use            
+                          WHERE tin2.pta_id = b_com_of_pta_id
+                          AND   tin2.pin_id = b_pin_id 
+                          AND   tin2.use_id_execute = use.id )       
+           AND
+            b_com_of_pta_id IS NOT NULL 
+          )
+        OR
+         ( b_com_of_pta_id IS NULL )
+        )    
+  AND ( ( vupt.com_id <> ( SELECT use.com_id         -- NOT previous company users of the user who executed a previous task
+                           FROM task_instances tin2 
+                           ,    users          use            
+                           WHERE tin2.pta_id = b_not_com_of_pta_id
+                           AND   tin2.pin_id = b_pin_id 
+                           AND   tin2.use_id_execute = use.id )       
+           AND
+            b_not_com_of_pta_id IS NOT NULL 
+          )
+        OR
+         ( b_not_com_of_pta_id IS NULL )
+        )
+        AND NOT (b_pta_name = 'Complete ECT' and vupt.use_id <>
+                    (select ect.use_ect_id
+                     from process_instances pin
+                     ,    ects ect
+                     where pin.id = l_pin_id
+                     and ect.id = pin.ctx_id))
+        AND NOT (b_pta_name = 'Accept ECT' and vupt.use_id <>
+                    (select ect.acc_use_id
+                     from process_instances pin
+                     ,    ects ect
+                     where pin.id = l_pin_id
+                     and ect.id = pin.ctx_id))
+;
+ 
+-- share users (all users in project except current user)
+-- extended with limitation to authorized for process_type
+CURSOR c_shu IS
+  SELECT distinct use.id, use.name
+  FROM users use
+  , user_projects upr
+  , process_instances pin
+  , vw_use_pro_proc_active vupp
+  WHERE use.id = upr.use_id
+  AND   upr.pro_id = p_pro_id
+  AND   use.id <> p_use_id
+  AND   pin.id = l_pin_id
+  AND   vupp.use_id  = use.id
+  AND   vupp.pro_id  = upr.pro_id
+  AND   vupp.proc_id = pin.proc_id
+  AND   vupp.ind_active = 'Y';
+ 
+BEGIN  
+ 
+    
+  -- Get context
+  OPEN c_tin;
+  FETCH c_tin INTO l_ind_tin;
+  CLOSE c_tin;
+  
+  -- Get pta/pin
+  OPEN c_pta;
+  FETCH c_pta INTO l_pta_id
+              ,    l_pin_id;
+  CLOSE c_pta;
+  
+  IF l_ind_tin IS NOT NULL THEN
+        
+    -- And  
+    FOR r_and IN c_and LOOP   
+      l_ind_and := 'Y';
+      l_task := pk_xml_api.create_element('pta_id', r_and.pta_id) ||
+                pk_xml_api.create_save_element('name', r_and.pta_name) ||
+                pk_xml_api.create_save_element('task_label', r_and.task_label) ;     
+      
+      -- Users
+      l_users := NULL;
+      FOR r_use IN c_use( b_pta_id => r_and.pta_id
+                        , b_pin_id => l_pin_id
+                        , b_use_of_pta_id => r_and.use_of_pta_id
+                        , b_com_of_pta_id => r_and.com_of_pta_id 
+                        , b_not_com_of_pta_id => r_and.not_com_of_pta_id
+                        , b_pta_name => r_and.pta_name) LOOP
+         l_users := l_users || pk_xml_api.create_element('user',
+                                 pk_xml_api.create_element('use_id',r_use.id)  ||
+                                 pk_xml_api.create_element('name',r_use.name)
+                                                        );
+      END LOOP;     
+      l_task := l_task || pk_xml_api.create_element('users',l_users); 
+      
+      -- Add task
+      l_tasks := l_tasks || pk_xml_api.create_element('task',l_task);             
+ 
+    END LOOP; 
+    
+    -- All tasks
+    l_response := pk_xml_api.create_element('tasks',l_tasks);             
+ 
+    -- Share Users
+    FOR r_shu IN c_shu LOOP
+ 
+       l_share_users := l_share_users || pk_xml_api.create_element('share_user',
+                                 pk_xml_api.create_element('share_use_id',r_shu.id)  ||
+                                 pk_xml_api.create_element('share_name',r_shu.name)
+                                                        );        
+    END LOOP;
+    l_response := l_response || pk_xml_api.create_element('share_users',l_share_users);
+      
+  ELSE
+    l_response := pk_xml_api.create_element('error','Invalid task instance for this user.');
+  END IF;
+  
+  RETURN l_response;
+ 
+END;
+PROCEDURE DISMISS_USER_TASK
+ (P_USE_ID IN NUMBER
+ ,P_TIN_ID IN NUMBER
+ )
+ IS
+-- Dismiss a specific task (tin_id) for a given user
+BEGIN
+  
+   -- Create a dismissed_task
+   INSERT INTO dismissed_tasks
+   ( use_id
+   , tin_id ) VALUES
+     ( p_use_id
+     , p_tin_id ); 
+  
+END;
+PROCEDURE SET_TASK_SHARE_USERS
+ (P_TIN_ID IN NUMBER
+ ,P_SHARE_USE IN APEX_APPLICATION_GLOBAL.VC_ARR2
+ )
+ IS
+-- Set a number of share users for a task_instance
+ 
+l_exists VARCHAR2(1);
+l_error  VARCHAR2(4000);
+ 
+-- tin check for this user 
+CURSOR c_shu (b_share_use_id IN NUMBER) IS
+  SELECT 'Y'
+  FROM tin_share_users shu
+  WHERE shu.tin_id = p_tin_id
+  AND   shu.use_id = b_share_use_id;
+BEGIN
+ 
+-- Loop through share_users
+IF p_share_use.count >= 1 THEN
+ 
+ FOR i IN 1 .. p_share_use.count LOOP
+ 
+  l_exists := 'N';
+ 
+  -- Get context
+  OPEN c_shu ( b_share_use_id => p_share_use(i));
+  FETCH c_shu INTO l_exists;
+  CLOSE c_shu;
+ 
+   IF l_exists = 'N' THEN
+      -- Create a task share user
+      INSERT INTO tin_share_users
+        ( tin_id
+        , use_id
+        , ind_active) VALUES
+        ( p_tin_id
+        , p_share_use(i)
+        , 'Y' );
+   END IF;
+ 
+ END LOOP;
+ 
+END IF;
+ 
+EXCEPTION WHEN OTHERS THEN
+    l_error := SQLERRM;
+    pk_log.log_message( p_module  => 'pk_wf_api.set_task_share_users'
+                      , p_message => 'Unexpected error, error:'||substr(l_error,1,3000) || ' p_tin_id:'||p_tin_id );
+    raise_application_error( -20001, 'Unexpected error when executing this task.' );
+END;
+ 
+END PK_WF_API;
+
